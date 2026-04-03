@@ -1,0 +1,12 @@
+data_path: ""
+results_dir: "results"
+model: "DiT-XL/2"
+image_size: 256
+num_classes: 1000
+epochs: 1400
+global_batch_size: 256
+global_seed: 0
+vae: "ema"
+num_workers: 4
+log_every: 100
+ckpt_every: 50000

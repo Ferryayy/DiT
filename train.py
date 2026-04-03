@@ -26,6 +26,7 @@ from time import time
 import argparse
 import logging
 import os
+import yaml
 
 from models import DiT_models
 from diffusion import create_diffusion
@@ -250,20 +251,37 @@ def main(args):
     cleanup()
 
 
+def load_args(config_path):
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f) or {}
+
+    defaults = {
+        "data_path": None,
+        "results_dir": "results",
+        "model": "DiT-XL/2",
+        "image_size": 256,
+        "num_classes": 1000,
+        "epochs": 1400,
+        "global_batch_size": 256,
+        "global_seed": 0,
+        "vae": "ema",
+        "num_workers": 4,
+        "log_every": 100,
+        "ckpt_every": 50_000,
+    }
+    defaults.update(config)
+
+    assert defaults["data_path"], "Please set data_path in the config file."
+    assert defaults["model"] in DiT_models, f"Model must be one of {list(DiT_models.keys())}."
+    assert defaults["image_size"] in [256, 512], "Image size must be 256 or 512."
+    assert defaults["vae"] in ["ema", "mse"], "VAE must be ema or mse."
+
+    return argparse.Namespace(**defaults)
+
+
 if __name__ == "__main__":
-    # Default args here will train DiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-path", type=str, required=True)
-    parser.add_argument("--results-dir", type=str, default="results")
-    parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
-    parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
-    parser.add_argument("--num-classes", type=int, default=1000)
-    parser.add_argument("--epochs", type=int, default=1400)
-    parser.add_argument("--global-batch-size", type=int, default=256)
-    parser.add_argument("--global-seed", type=int, default=0)
-    parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")  # Choice doesn't affect training
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--log-every", type=int, default=100)
-    parser.add_argument("--ckpt-every", type=int, default=50_000)
-    args = parser.parse_args()
+    parser.add_argument("--config", type=str, default="configs/train.yaml")
+    cli_args = parser.parse_args()
+    args = load_args(cli_args.config)
     main(args)
