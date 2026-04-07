@@ -1,11 +1,11 @@
-data_path: ""
-results_dir: "results"
-model: "DiT-XL/2"
+data_path: "/home/project_cx/G_IR_Diffusion/data/face/data1/fig"
+results_dir: "/home/project_cx/G_IR_Diffusion/DiT/results/0404"
+model: "DiT-S/8"
 image_size: 256
-num_classes: 1000
-epochs: 1400
+num_classes: 1
+epochs: 100
 global_batch_size: 256
-global_seed: 0
+global_seed: 42
 vae: "ema"
 num_workers: 4
 log_every: 100
