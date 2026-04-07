@@ -1,3 +1,7 @@
+train_mode: "single"   # single | ddp | auto
+gpu_ids: "0"           # 单卡示例: "5"；多卡示例: "0,1,2,3"
+master_addr: "127.0.0.1" # 多卡的时候填写hostname -I
+master_port: 29500
 data_path: ""
 results_dir: "results"
 model: "DiT-XL/2"
