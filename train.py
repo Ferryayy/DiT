@@ -30,7 +30,7 @@ import yaml
 
 from models import DiT_models
 from diffusion import create_diffusion
-from diffusers.models import AutoencoderKL
+from vae_utils import load_vae
 
 
 #################################################################################
@@ -210,7 +210,8 @@ def main(args):
     if distributed:
         model = DDP(model, device_ids=[local_rank])
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
+    vae, vae_source, vae_source_kind = load_vae(args.vae, args.vae_path, device)
+    logger.info(f"Loaded VAE from {'local path' if vae_source_kind == 'local' else 'Hugging Face'}: {vae_source}")
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
@@ -330,6 +331,7 @@ def load_args(config_path):
         "global_batch_size": 256,
         "global_seed": 0,
         "vae": "ema",
+        "vae_path": None,
         "num_workers": 4,
         "log_every": 100,
         "ckpt_every": 50_000,
@@ -358,6 +360,10 @@ def load_args(config_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/train.yaml")
+    parser.add_argument("--vae-path", type=str, default=None,
+                        help="Optional local diffusers VAE directory. If set, this overrides vae_path in the config.")
     cli_args = parser.parse_args()
     args = load_args(cli_args.config)
+    if cli_args.vae_path is not None:
+        args.vae_path = cli_args.vae_path
     main(args)

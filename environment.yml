@@ -11,4 +11,5 @@ dependencies:
     - timm
     - diffusers
     - accelerate
+    - huggingface_hub
     - pyyaml

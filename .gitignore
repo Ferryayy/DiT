@@ -1,3 +1,4 @@
 .nvimlog
 .vscode
 __pycache__
+pretrained_models
