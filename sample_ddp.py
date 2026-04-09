@@ -16,13 +16,13 @@ import torch.distributed as dist
 from models import DiT_models
 from download import find_model
 from diffusion import create_diffusion
-from diffusers.models import AutoencoderKL
 from tqdm import tqdm
 import os
 from PIL import Image
 import numpy as np
 import math
 import argparse
+from vae_utils import load_vae
 
 
 def create_npz_from_sample_folder(sample_dir, num=50_000):
@@ -76,14 +76,17 @@ def main(args):
     model.load_state_dict(state_dict)
     model.eval()  # important!
     diffusion = create_diffusion(str(args.num_sampling_steps))
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
+    vae, vae_source, vae_source_kind = load_vae(args.vae, args.vae_path, device)
+    if rank == 0:
+        print(f"Loaded VAE from {'local path' if vae_source_kind == 'local' else 'Hugging Face'}: {vae_source}")
     assert args.cfg_scale >= 1.0, "In almost all cases, cfg_scale be >= 1.0"
     using_cfg = args.cfg_scale > 1.0
 
     # Create folder to save samples:
     model_string_name = args.model.replace("/", "-")
     ckpt_string_name = os.path.basename(args.ckpt).replace(".pt", "") if args.ckpt else "pretrained"
-    folder_name = f"{model_string_name}-{ckpt_string_name}-size-{args.image_size}-vae-{args.vae}-" \
+    vae_name = f"local-{os.path.basename(os.path.normpath(vae_source))}" if vae_source_kind == "local" else args.vae
+    folder_name = f"{model_string_name}-{ckpt_string_name}-size-{args.image_size}-vae-{vae_name}-" \
                   f"cfg-{args.cfg_scale}-seed-{args.global_seed}"
     sample_folder_dir = f"{args.sample_dir}/{folder_name}"
     if rank == 0:
@@ -150,6 +153,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
     parser.add_argument("--vae",  type=str, choices=["ema", "mse"], default="ema")
+    parser.add_argument("--vae-path", type=str, default=None,
+                        help="Optional local diffusers VAE directory. If set, this overrides --vae.")
     parser.add_argument("--sample-dir", type=str, default="samples")
     parser.add_argument("--per-proc-batch-size", type=int, default=32)
     parser.add_argument("--num-fid-samples", type=int, default=50_000)

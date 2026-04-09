@@ -115,6 +115,21 @@ vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema")
 
 **首次运行时**，VAE 权重会从 HuggingFace 自动下载（约 335MB）。
 
+如果远程机器无法访问 HuggingFace/CDN，也可以先在联网机器上运行：
+
+```bash
+python download_vae.py --variant ema
+python download_vae.py --variant mse
+```
+
+默认会生成：
+- `pretrained_models/vae/sd-vae-ft-ema`
+- `pretrained_models/vae/sd-vae-ft-mse`
+
+然后把目录拷到远端，在训练或推理时通过 `--vae-path /path/to/local/vae` 指定本地 VAE 目录即可。
+
+这里使用的是 Hugging Face 的 `snapshot_download`：下载的是某个 revision 的文件快照，不包含 `git clone` 的完整历史。
+
 ---
 
 ## 环境安装
@@ -135,6 +150,7 @@ pip install torch torchvision   # 需要 >= 1.13，建议装 CUDA 版本
 pip install timm                # Vision Transformer 组件
 pip install diffusers           # 用于加载 Stable Diffusion 的 VAE
 pip install accelerate          # diffusers 的依赖
+pip install huggingface_hub     # 用于下载本地 VAE 快照
 ```
 
 ### 依赖总结
@@ -146,6 +162,7 @@ pip install accelerate          # diffusers 的依赖
 | `timm` | 提供 PatchEmbed、Attention 等 ViT 组件 |
 | `diffusers` | 加载 Stable Diffusion 的 VAE 模型 |
 | `accelerate` | diffusers 的运行时依赖 |
+| `huggingface_hub` | 下载 Hugging Face 上的 VAE 快照到本地 |
 
 ---
 
@@ -226,6 +243,7 @@ torchrun --nnodes=1 --nproc_per_node=N train.py \
 | `--global-batch-size` | `256` | 全局 batch size（会自动分配到各 GPU） |
 | `--num-classes` | `1000` | 类别数（ImageNet 为 1000） |
 | `--vae` | `ema` | VAE 变体（`ema` 或 `mse`，训练时无影响） |
+| `--vae-path` | `None` | 本地 diffusers VAE 目录；设置后优先于 `vae`，适合离线机器 |
 | `--results-dir` | `results` | 输出目录 |
 | `--log-every` | `100` | 每 N 步打印一次日志 |
 | `--ckpt-every` | `50000` | 每 N 步保存一次 checkpoint |
@@ -280,7 +298,13 @@ python sample.py --image-size 512 --seed 1
 python sample.py --model DiT-XL/2 --image-size 256 --ckpt /path/to/your/checkpoint.pt
 ```
 
-### 方式三：Jupyter Notebook
+### 方式三：使用本地 VAE（离线环境）
+
+```bash
+python sample.py --image-size 256 --vae-path /path/to/sd-vae-ft-mse
+```
+
+### 方式四：Jupyter Notebook
 
 打开 `run_DiT.ipynb`，可以在 Colab 或本地 Jupyter 中交互式运行。
 
@@ -332,6 +356,7 @@ class_labels = [207, 360, 387, 974, 88, 979, 417, 279]
 
 ```bash
 python download.py   # 下载所有预训练模型到 pretrained_models/
+python download_vae.py --variant both   # 下载 VAE 到 pretrained_models/vae/
 ```
 
 ---

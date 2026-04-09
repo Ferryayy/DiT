@@ -58,6 +58,21 @@ our 512x512 DiT-XL/2 model, you can use:
 python sample.py --image-size 512 --seed 1
 ```
 
+If your training or sampling machine cannot reach Hugging Face, download a local VAE snapshot on a machine with internet access:
+
+```bash
+python download_vae.py --variant ema
+python download_vae.py --variant mse
+```
+
+This creates diffusers-compatible local directories such as `pretrained_models/vae/sd-vae-ft-ema`. Copy that directory to the remote machine and point the scripts at it:
+
+```bash
+python sample.py --image-size 512 --vae-path /path/to/sd-vae-ft-mse
+```
+
+`download_vae.py` uses `snapshot_download`, which fetches a file snapshot for one repository revision instead of cloning git history.
+
 For convenience, our pre-trained DiT models can be downloaded directly here as well:
 
 | DiT Model     | Image Resolution | FID-50K | Inception Score | Gflops | 
@@ -83,6 +98,12 @@ one node:
 
 ```bash
 torchrun --nnodes=1 --nproc_per_node=N train.py --model DiT-XL/2 --data-path /path/to/imagenet/train
+```
+
+To force training to use a locally copied VAE instead of downloading from Hugging Face, pass:
+
+```bash
+torchrun --nnodes=1 --nproc_per_node=N train.py --config configs/train.yaml --vae-path /path/to/sd-vae-ft-ema
 ```
 
 ### PyTorch Training Results
