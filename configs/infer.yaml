@@ -1,0 +1,32 @@
+infer_mode: "auto"      # single | ddp | auto
+gpu_ids: "auto"         # auto | "0" | "0,1,2,3"
+master_addr: "127.0.0.1"
+master_port: 29501
+
+model: "DiT-XL/2"
+ckpt: null              # null uses the official pretrained checkpoint for DiT-XL/2
+image_size: 256
+num_classes: 1000
+
+vae: "mse"
+vae_path: null          # e.g. /path/to/sd-vae-ft-mse
+
+cfg_scale: 4.0
+num_sampling_steps: 250
+per_proc_batch_size: 8
+global_seed: 0
+tf32: true
+
+output_dir: "inference_outputs"
+run_name: null
+
+# Option A: fixed labels, useful for repeatable visual checks.
+class_labels: [207, 360, 387, 974, 88, 979, 417, 279]
+
+# Option B: random labels. Leave class_labels empty/null and set num_samples.
+num_samples: null
+
+save_grid: true
+grid_nrow: 4
+grid_max_images: 64
+save_npz: false
