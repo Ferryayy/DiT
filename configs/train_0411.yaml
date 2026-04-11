@@ -1,0 +1,17 @@
+data_path: "/home/project_cx/G_IR_Diffusion/data/face/data1/fig"
+results_dir: "/home/project_cx/G_IR_Diffusion/DiT/results/0411"
+model: "DiT-L/2"
+train_mode: "ddp"   # single | ddp | auto
+gpu_ids: "4,5,6,7"           # 单卡示例: "5"；多卡示例: "0,1,2,3"
+master_addr: "127.0.0.1" # 多卡的时候填写hostname -I
+master_port: 29500
+image_size: 256
+num_classes: 1
+epochs: 200
+global_batch_size: 64
+global_seed: 42
+vae: "ema"
+vae_path: /home/project_cx/G_IR_Diffusion/DiT/pretrained_models/vae/sd-vae-ft-ema
+num_workers: 4
+log_every: 100
+ckpt_every: 50000

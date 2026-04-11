@@ -1,32 +1,32 @@
-infer_mode: "auto"      # single | ddp | auto
-gpu_ids: "auto"         # auto | "0" | "0,1,2,3"
+infer_mode: "single"      # single | ddp | auto
+gpu_ids: "7"         # auto | "0" | "0,1,2,3"
 master_addr: "127.0.0.1"
 master_port: 29501
 
-model: "DiT-XL/2"
-ckpt: null              # null uses the official pretrained checkpoint for DiT-XL/2
+model: "DiT-S/8"
+ckpt: /home/project_cx/G_IR_Diffusion/DiT/results/0408/000-DiT-S-8/checkpoints/0050000.pt
 image_size: 256
-num_classes: 1000
+num_classes: 1
 
 vae: "mse"
-vae_path: null          # e.g. /path/to/sd-vae-ft-mse
+vae_path: /home/project_cx/G_IR_Diffusion/DiT/pretrained_models/vae/sd-vae-ft-mse        # e.g. /path/to/sd-vae-ft-mse
 
-cfg_scale: 4.0
+cfg_scale: 1.0
 num_sampling_steps: 250
 per_proc_batch_size: 8
-global_seed: 0
+global_seed: 42
 tf32: true
 
 output_dir: "inference_outputs"
-run_name: null
+run_name: 0408
 
 # Option A: fixed labels, useful for repeatable visual checks.
-class_labels: [207, 360, 387, 974, 88, 979, 417, 279]
+class_labels: null
 
 # Option B: random labels. Leave class_labels empty/null and set num_samples.
-num_samples: null
+num_samples: 64
 
 save_grid: true
-grid_nrow: 4
+grid_nrow: 8
 grid_max_images: 64
 save_npz: false
