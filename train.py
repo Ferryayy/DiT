@@ -13,7 +13,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.datasets import ImageFolder
 from torchvision import transforms
@@ -167,6 +167,166 @@ def setup_distributed(args):
     return distributed, rank, world_size, local_rank, device
 
 
+def build_transforms(image_size):
+    train_transform = transforms.Compose([
+        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, image_size)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    ])
+    eval_transform = transforms.Compose([
+        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    ])
+    return train_transform, eval_transform
+
+
+def resolve_dataset_roots(data_path, val_data_path=None):
+    if val_data_path:
+        return data_path, val_data_path, "explicit"
+
+    train_candidate = os.path.join(data_path, "train")
+    val_candidate = os.path.join(data_path, "val")
+    if os.path.isdir(train_candidate) and os.path.isdir(val_candidate):
+        return train_candidate, val_candidate, "auto"
+
+    return data_path, None, None
+
+
+def build_datasets(args, logger):
+    train_transform, val_transform = build_transforms(args.image_size)
+    train_root, val_root, split_source = resolve_dataset_roots(args.data_path, args.val_data_path)
+
+    if val_root is not None:
+        train_dataset = ImageFolder(train_root, transform=train_transform)
+        val_dataset = ImageFolder(val_root, transform=val_transform)
+        if train_dataset.class_to_idx != val_dataset.class_to_idx:
+            raise ValueError("Training and validation datasets must share the same class folder names.")
+        if split_source == "auto":
+            logger.info(f"Detected split datasets under {args.data_path}: train={train_root}, val={val_root}")
+        else:
+            logger.info(f"Using explicit validation dataset: train={train_root}, val={val_root}")
+        return train_dataset, val_dataset
+
+    train_dataset = ImageFolder(train_root, transform=train_transform)
+    if args.val_split > 0:
+        total_size = len(train_dataset)
+        val_size = int(total_size * args.val_split)
+        if val_size <= 0 or val_size >= total_size:
+            raise ValueError("val_split must leave at least one sample for both training and validation.")
+        split_seed = args.global_seed if args.split_seed is None else args.split_seed
+        indices = np.random.RandomState(split_seed).permutation(total_size)
+        val_indices = indices[:val_size].tolist()
+        train_indices = indices[val_size:].tolist()
+        val_source_dataset = ImageFolder(train_root, transform=val_transform)
+        train_dataset = Subset(train_dataset, train_indices)
+        val_dataset = Subset(val_source_dataset, val_indices)
+        logger.info(
+            f"Split {train_root} into {len(train_dataset):,} train and {len(val_dataset):,} val samples "
+            f"(val_split={args.val_split}, split_seed={split_seed})."
+        )
+        return train_dataset, val_dataset
+
+    logger.info(f"Using training dataset only from {train_root}.")
+    return train_dataset, None
+
+
+def create_data_loader(
+    dataset,
+    batch_size,
+    num_workers,
+    distributed,
+    rank,
+    world_size,
+    global_seed,
+    shuffle,
+    drop_last,
+    use_distributed_sampler=True,
+):
+    if dataset is None:
+        return None, None
+
+    loader_dataset = dataset
+    sampler = None
+    if distributed and use_distributed_sampler:
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=shuffle,
+            seed=global_seed
+        )
+    elif distributed:
+        loader_dataset = Subset(dataset, list(range(rank, len(dataset), world_size)))
+
+    loader = DataLoader(
+        loader_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle and sampler is None,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=drop_last
+    )
+    return loader, sampler
+
+
+def create_summary_writer(log_dir, enabled, logger):
+    if not enabled or get_rank() != 0:
+        return None
+
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ModuleNotFoundError:
+        logger.warning("TensorBoard logging is enabled, but tensorboard is not installed. Continuing without it.")
+        return None
+
+    os.makedirs(log_dir, exist_ok=True)
+    logger.info(f"TensorBoard logs will be written to {log_dir}")
+    return SummaryWriter(log_dir=log_dir)
+
+
+def save_checkpoint(checkpoint_path, model, ema, opt, args, train_steps, epoch, val_loss=None, best_val_loss=None):
+    checkpoint = {
+        "model": model.state_dict(),
+        "ema": ema.state_dict(),
+        "opt": opt.state_dict(),
+        "args": args,
+        "train_steps": train_steps,
+        "epoch": epoch,
+        "val_loss": val_loss,
+        "best_val_loss": best_val_loss,
+    }
+    torch.save(checkpoint, checkpoint_path)
+
+
+@torch.no_grad()
+def run_validation(model, diffusion, vae, loader, device, distributed):
+    was_training = model.training
+    model.eval()
+
+    total_loss = torch.zeros(1, device=device)
+    total_samples = torch.zeros(1, device=device)
+    for x, y in loader:
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        latents = vae.encode(x).latent_dist.sample().mul_(0.18215)
+        t = torch.randint(0, diffusion.num_timesteps, (latents.shape[0],), device=device)
+        loss_dict = diffusion.training_losses(model, latents, t, dict(y=y))
+        total_loss += loss_dict["loss"].sum()
+        total_samples += latents.shape[0]
+
+    if distributed:
+        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_samples, op=dist.ReduceOp.SUM)
+
+    if was_training:
+        model.train()
+
+    return (total_loss / total_samples.clamp_min(1)).item()
+
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -184,17 +344,22 @@ def main(args):
     print(f"Starting rank={rank}, local_rank={local_rank}, seed={seed}, world_size={world_size}, distributed={distributed}.")
 
     # Setup an experiment folder:
+    experiment_dir = None
+    checkpoint_dir = None
+    tensorboard_dir = None
     if rank == 0:
         os.makedirs(args.results_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
         experiment_index = len(glob(f"{args.results_dir}/*"))
         model_string_name = args.model.replace("/", "-")  # e.g., DiT-XL/2 --> DiT-XL-2 (for naming folders)
         experiment_dir = f"{args.results_dir}/{experiment_index:03d}-{model_string_name}"  # Create an experiment folder
         checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
+        tensorboard_dir = f"{experiment_dir}/tensorboard"
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
     else:
         logger = create_logger(None)
+    writer = create_summary_writer(tensorboard_dir, args.tensorboard, logger)
 
     # Create model:
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
@@ -211,6 +376,7 @@ def main(args):
         model = DDP(model, device_ids=[local_rank])
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae, vae_source, vae_source_kind = load_vae(args.vae, args.vae_path, device)
+    vae.eval()
     logger.info(f"Loaded VAE from {'local path' if vae_source_kind == 'local' else 'Hugging Face'}: {vae_source}")
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -218,30 +384,36 @@ def main(args):
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
 
     # Setup data:
-    transform = transforms.Compose([
-        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
-    ])
-    dataset = ImageFolder(args.data_path, transform=transform)
-    sampler = DistributedSampler(
-        dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=True,
-        seed=args.global_seed
-    ) if distributed else None
-    loader = DataLoader(
-        dataset,
+    train_dataset, val_dataset = build_datasets(args, logger)
+    train_loader, train_sampler = create_data_loader(
+        train_dataset,
         batch_size=int(args.global_batch_size // world_size),
-        shuffle=sampler is None,
-        sampler=sampler,
         num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+        global_seed=args.global_seed,
+        shuffle=True,
+        drop_last=True,
+        use_distributed_sampler=True,
     )
-    logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
+    val_loader, _ = create_data_loader(
+        val_dataset,
+        batch_size=int(args.global_batch_size // world_size),
+        num_workers=args.num_workers,
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+        global_seed=args.global_seed,
+        shuffle=False,
+        drop_last=False,
+        use_distributed_sampler=False,
+    )
+    logger.info(f"Train dataset contains {len(train_dataset):,} images")
+    if val_dataset is not None:
+        logger.info(f"Validation dataset contains {len(val_dataset):,} images")
+    elif args.val_every > 0:
+        logger.warning("val_every is set, but no validation dataset is configured. Set val_data_path or val_split to enable validation.")
 
     # Prepare models for training:
     model_without_ddp = model.module if distributed else model
@@ -254,13 +426,16 @@ def main(args):
     log_steps = 0
     running_loss = 0
     start_time = time()
+    best_val_loss = None
+    last_val_loss = None
+    validation_enabled = val_loader is not None and args.val_every > 0
 
     logger.info(f"Training for {args.epochs} epochs...")
     for epoch in range(args.epochs):
-        if sampler is not None:
-            sampler.set_epoch(epoch)
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
-        for x, y in loader:
+        for x, y in train_loader:
             x = x.to(device)
             y = y.to(device)
             with torch.no_grad():
@@ -290,25 +465,88 @@ def main(args):
                     dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
                 avg_loss = avg_loss.item() / world_size
                 logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
+                if writer is not None:
+                    writer.add_scalar("loss/train", avg_loss, train_steps)
+                    writer.add_scalar("perf/train_steps_per_sec", steps_per_sec, train_steps)
                 # Reset monitoring variables:
                 running_loss = 0
                 log_steps = 0
                 start_time = time()
 
+            if validation_enabled and train_steps % args.val_every == 0:
+                val_loss = run_validation(ema, diffusion, vae, val_loader, device, distributed)
+                last_val_loss = val_loss
+                is_best = best_val_loss is None or val_loss < best_val_loss
+                if is_best:
+                    best_val_loss = val_loss
+                if rank == 0:
+                    logger.info(f"(step={train_steps:07d}) Val Loss (EMA): {val_loss:.4f}")
+                    if writer is not None:
+                        writer.add_scalar("loss/val", val_loss, train_steps)
+                    last_checkpoint_path = f"{checkpoint_dir}/last.pt"
+                    save_checkpoint(
+                        last_checkpoint_path, model_without_ddp, ema, opt, args,
+                        train_steps=train_steps, epoch=epoch, val_loss=val_loss, best_val_loss=best_val_loss
+                    )
+                    logger.info(f"Updated last checkpoint at {last_checkpoint_path}")
+                    if is_best:
+                        best_checkpoint_path = f"{checkpoint_dir}/best.pt"
+                        save_checkpoint(
+                            best_checkpoint_path, model_without_ddp, ema, opt, args,
+                            train_steps=train_steps, epoch=epoch, val_loss=val_loss, best_val_loss=best_val_loss
+                        )
+                        logger.info(f"Updated best checkpoint at {best_checkpoint_path}")
+                if distributed:
+                    dist.barrier()
+
             # Save DiT checkpoint:
             if train_steps % args.ckpt_every == 0 and train_steps > 0:
                 if rank == 0:
-                    checkpoint = {
-                        "model": model_without_ddp.state_dict(),
-                        "ema": ema.state_dict(),
-                        "opt": opt.state_dict(),
-                        "args": args
-                    }
                     checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
-                    torch.save(checkpoint, checkpoint_path)
+                    save_checkpoint(
+                        checkpoint_path, model_without_ddp, ema, opt, args,
+                        train_steps=train_steps, epoch=epoch, val_loss=last_val_loss, best_val_loss=best_val_loss
+                    )
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
+                    last_checkpoint_path = f"{checkpoint_dir}/last.pt"
+                    save_checkpoint(
+                        last_checkpoint_path, model_without_ddp, ema, opt, args,
+                        train_steps=train_steps, epoch=epoch, val_loss=last_val_loss, best_val_loss=best_val_loss
+                    )
+                    logger.info(f"Updated last checkpoint at {last_checkpoint_path}")
                 if distributed:
                     dist.barrier()
+
+    if validation_enabled and train_steps > 0 and train_steps % args.val_every != 0:
+        val_loss = run_validation(ema, diffusion, vae, val_loader, device, distributed)
+        last_val_loss = val_loss
+        is_best = best_val_loss is None or val_loss < best_val_loss
+        if is_best:
+            best_val_loss = val_loss
+        if rank == 0:
+            logger.info(f"(final step={train_steps:07d}) Val Loss (EMA): {val_loss:.4f}")
+            if writer is not None:
+                writer.add_scalar("loss/val", val_loss, train_steps)
+            if is_best:
+                best_checkpoint_path = f"{checkpoint_dir}/best.pt"
+                save_checkpoint(
+                    best_checkpoint_path, model_without_ddp, ema, opt, args,
+                    train_steps=train_steps, epoch=args.epochs - 1, val_loss=val_loss, best_val_loss=best_val_loss
+                )
+                logger.info(f"Updated best checkpoint at {best_checkpoint_path}")
+        if distributed:
+            dist.barrier()
+
+    if rank == 0:
+        last_checkpoint_path = f"{checkpoint_dir}/last.pt"
+        save_checkpoint(
+            last_checkpoint_path, model_without_ddp, ema, opt, args,
+            train_steps=train_steps, epoch=args.epochs - 1, val_loss=last_val_loss, best_val_loss=best_val_loss
+        )
+        logger.info(f"Saved final last checkpoint to {last_checkpoint_path}")
+        if writer is not None:
+            writer.flush()
+            writer.close()
 
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
@@ -332,9 +570,14 @@ def load_args(config_path):
         "global_seed": 0,
         "vae": "ema",
         "vae_path": None,
+        "val_data_path": None,
+        "val_split": 0.0,
+        "split_seed": None,
         "num_workers": 4,
         "log_every": 100,
         "ckpt_every": 50_000,
+        "val_every": 0,
+        "tensorboard": True,
         "train_mode": "single",
         "gpu_ids": "0",
         "master_addr": "127.0.0.1",
@@ -346,6 +589,15 @@ def load_args(config_path):
     assert defaults["model"] in DiT_models, f"Model must be one of {list(DiT_models.keys())}."
     assert defaults["image_size"] in [256, 512], "Image size must be 256 or 512."
     assert defaults["vae"] in ["ema", "mse"], "VAE must be ema or mse."
+    if isinstance(defaults["val_data_path"], str) and not defaults["val_data_path"].strip():
+        defaults["val_data_path"] = None
+    if isinstance(defaults["split_seed"], str) and not defaults["split_seed"].strip():
+        defaults["split_seed"] = None
+    if defaults["split_seed"] is not None:
+        defaults["split_seed"] = int(defaults["split_seed"])
+    assert 0.0 <= float(defaults["val_split"]) < 1.0, "val_split must be in [0, 1)."
+    assert int(defaults["ckpt_every"]) > 0, "ckpt_every must be > 0."
+    assert int(defaults["val_every"]) >= 0, "val_every must be >= 0."
     defaults["gpu_ids"] = parse_gpu_ids(defaults["gpu_ids"])
     assert defaults["train_mode"] in ["single", "ddp", "auto"], "train_mode must be single, ddp, or auto."
     assert defaults["gpu_ids"], "Please provide at least one GPU id in gpu_ids."

@@ -15,3 +15,9 @@ vae_path: /home/project_cx/G_IR_Diffusion/DiT/pretrained_models/vae/sd-vae-ft-em
 num_workers: 4
 log_every: 100
 ckpt_every: 50000
+val_data_path: null      # 可选：单独验证集根目录；若 data_path 下有 train/val 也会自动识别
+val_split: 0.1           # 可选：没有单独验证集时，从 data_path 切出验证集比例，例如 0.1
+split_seed: null         # 可选：固定 train/val 划分；为空时默认使用 global_seed
+ckpt_every: 50000        # 每多少个 train steps 保存一个编号 checkpoint
+val_every: 10000             # 每多少个 train steps 验证一次；0 表示关闭验证
+tensorboard: true
